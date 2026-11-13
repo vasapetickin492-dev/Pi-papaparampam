@@ -21,9 +21,13 @@ from urllib.parse import urlparse
 # base64-подписки). Ищите на GitHub: "free v2ray subscription", "vless sub".
 # Для публичных Telegram-каналов можно использовать страницу https://t.me/s/ИМЯ_КАНАЛА
 SOURCES = [
-    # "https://raw.githubusercontent.com/USER/REPO/main/sub.txt",
-    # "https://t.me/s/имя_канала",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
+    "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
+    "https://github.com/pie-with-jam/PulseProxy/raw/refs/heads/main/githubmirror/1.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
 ]
+
 
 MAX_KEYS = 40          # сколько лучших ключей оставить
 TIMEOUT = 4            # секунд на проверку одного ключа
