@@ -3,6 +3,9 @@
 Собирает бесплатные VPN-ключи из подписок/каналов, проверяет, какие порты
 реально отвечают, и сохраняет лучшие в sub.txt (base64-подписка для Happ).
 
+Каждый ключ получает в названии метку источника: [s1], [s2] и т.д.
+В логе запуска (Actions) выводится таблица: какой источник сколько дал.
+
 Только стандартная библиотека Python 3.8+. Ничего ставить не нужно.
 Запуск:  python collector.py
 """
@@ -14,12 +17,12 @@ import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 # ====== НАСТРОЙКИ ======
-# Сюда вставьте ссылки на подписки (текстовые файлы со списком ключей или
-# base64-подписки). Ищите на GitHub: "free v2ray subscription", "vless sub".
-# Для публичных Telegram-каналов можно использовать страницу https://t.me/s/ИМЯ_КАНАЛА
+# Нумерация идёт сверху вниз: первая ссылка = s1, вторая = s2 и так далее.
+# Если добавляете новые, лучше писать их в конец списка, чтобы метки
+# старых источников не поменялись.
 SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
@@ -28,14 +31,12 @@ SOURCES = [
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
 ]
 
-
 MAX_KEYS = 40          # сколько лучших ключей оставить
 TIMEOUT = 4            # секунд на проверку одного ключа
 THREADS = 60           # параллельных проверок
 OUTPUT = "sub.txt"     # итоговый файл подписки
 # ========================
 
-PROTOS = ("vless://", "vmess://", "trojan://", "ss://", "hysteria2://", "hy2://")
 LINK_RE = re.compile(r"(?:vless|vmess|trojan|ss|hysteria2|hy2)://[^\s\"'<>]+")
 
 
@@ -97,33 +98,70 @@ def check(link):
         return None
 
 
+def tag_link(link, tag):
+    """Дописывает метку источника в название ключа, чтобы она была видна в Happ."""
+    try:
+        if link.startswith("vmess://"):
+            data = json.loads(b64decode_safe(link[8:]))
+            data["ps"] = f'{data.get("ps", "")} [{tag}]'.strip()
+            raw = json.dumps(data, ensure_ascii=False).encode()
+            return "vmess://" + base64.b64encode(raw).decode()
+        base, _, frag = link.partition("#")
+        name = f"{unquote(frag)} [{tag}]".strip()
+        return f"{base}#{quote(name)}"
+    except Exception:
+        return link
+
+
 def main():
     if not SOURCES:
         sys.exit("Добавьте ссылки в SOURCES внутри collector.py")
 
-    links = []
-    for url in SOURCES:
+    stats = {}
+    tag_of = {}  # ключ -> метка первого источника, где он встретился
+    for i, url in enumerate(SOURCES, 1):
+        tag = f"s{i}"
+        stats[tag] = {"url": url, "found": 0, "unique": 0,
+                      "alive": 0, "used": 0, "error": ""}
         try:
             found = extract_links(fetch(url))
-            print(f"{url}: найдено {len(found)}")
-            links += found
         except Exception as e:
-            print(f"{url}: ошибка {e}")
+            stats[tag]["error"] = str(e)[:80]
+            continue
+        stats[tag]["found"] = len(found)
+        for l in found:
+            if l not in tag_of:
+                tag_of[l] = tag
+                stats[tag]["unique"] += 1
 
-    links = list(dict.fromkeys(links))  # убрать дубли, сохранив порядок
-    print(f"Всего уникальных: {len(links)}. Проверяю...")
+    links = list(tag_of)
+    print(f"Всего уникальных ключей: {len(links)}. Проверяю...")
 
     with ThreadPoolExecutor(THREADS) as ex:
         alive = [r for r in ex.map(check, links) if r]
-
     alive.sort(key=lambda x: x[1])
-    best = [l for l, _ in alive[:MAX_KEYS]]
-    print(f"Живых: {len(alive)}. Сохраняю лучших: {len(best)}")
+
+    for l, _ in alive:
+        stats[tag_of[l]]["alive"] += 1
+    best = alive[:MAX_KEYS]
+    for l, _ in best:
+        stats[tag_of[l]]["used"] += 1
+
+    print("\n=== Статистика по источникам ===")
+    for tag, s in stats.items():
+        if s["error"]:
+            print(f"{tag}: ОШИБКА загрузки ({s['error']})\n    {s['url']}")
+            continue
+        pct = round(100 * s["alive"] / s["unique"]) if s["unique"] else 0
+        print(f"{tag}: найдено {s['found']}, новых {s['unique']}, "
+              f"живых {s['alive']} ({pct}%), в подписке {s['used']}\n    {s['url']}")
+    print(f"\nЖивых всего: {len(alive)}. В подписку попало: {len(best)}")
 
     if not best:
         sys.exit("Рабочих ключей нет, файл не перезаписан")
 
-    payload = base64.b64encode("\n".join(best).encode()).decode()
+    out = [tag_link(l, tag_of[l]) for l, _ in best]
+    payload = base64.b64encode("\n".join(out).encode()).decode()
     with open(OUTPUT, "w") as f:
         f.write(payload)
     print(f"Готово: {OUTPUT}")
