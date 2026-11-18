@@ -31,7 +31,7 @@ SOURCES = [
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
 ]
 
-MAX_KEYS = 40          # сколько лучших ключей оставить
+MAX_KEYS = 60          # сколько лучших ключей оставить
 TIMEOUT = 4            # секунд на проверку одного ключа
 THREADS = 60           # параллельных проверок
 OUTPUT = "sub.txt"     # итоговый файл подписки
