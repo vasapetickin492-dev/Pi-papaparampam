@@ -31,12 +31,7 @@ SOURCES = [
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
 ]
 
-MAX_PER_SOURCE = 12    # сколько лучших ключей брать от КАЖДОГО источника
-# Номера источников (1 = s1, 2 = s2 ...), ключи которых НЕ проверяются
-# портом, а берутся как есть. Нужно для российских серверов белых списков:
-# они могут отвечать только из России, а проверка идёт из США и считает их
-# мёртвыми. Пример: NO_CHECK = [1, 2, 3]
-NO_CHECK = []
+MAX_KEYS = 40          # сколько лучших ключей оставить
 TIMEOUT = 4            # секунд на проверку одного ключа
 THREADS = 60           # параллельных проверок
 OUTPUT = "sub.txt"     # итоговый файл подписки
@@ -142,27 +137,15 @@ def main():
     links = list(tag_of)
     print(f"Всего уникальных ключей: {len(links)}. Проверяю...")
 
-    skip_tags = {f"s{n}" for n in NO_CHECK}
-    to_check = [l for l in links if tag_of[l] not in skip_tags]
-    unchecked = [(l, 999.0) for l in links if tag_of[l] in skip_tags]
-
     with ThreadPoolExecutor(THREADS) as ex:
-        alive = [r for r in ex.map(check, to_check) if r]
-    alive += unchecked
+        alive = [r for r in ex.map(check, links) if r]
     alive.sort(key=lambda x: x[1])
 
     for l, _ in alive:
         stats[tag_of[l]]["alive"] += 1
-
-    # квота на каждый источник, чтобы один быстрый не вытеснял остальные
-    taken = {}
-    best = []
-    for l, lat in alive:
-        t = tag_of[l]
-        if taken.get(t, 0) < MAX_PER_SOURCE:
-            taken[t] = taken.get(t, 0) + 1
-            best.append((l, lat))
-            stats[t]["used"] += 1
+    best = alive[:MAX_KEYS]
+    for l, _ in best:
+        stats[tag_of[l]]["used"] += 1
 
     print("\n=== Статистика по источникам ===")
     for tag, s in stats.items():
