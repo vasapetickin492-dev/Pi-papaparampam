@@ -87,12 +87,37 @@ def b64decode_safe(s):
         return ""
 
 
+LINE_RE = re.compile(r"(?:vless|vmess|trojan|ss|hysteria2|hy2)://\S")
+EXTRA_RE = re.compile(r"([?&]extra=)(.*?)(?=&[A-Za-z]+=|#|$)")
+
+
+def normalize(link):
+    """
+    Некоторые источники пишут extra сырым JSON с кавычками. Такой ключ нельзя
+    резать по кавычке, а Happ воспринимает его как повреждённый JSON.
+    Кодируем extra по правилам URL.
+    """
+    m = EXTRA_RE.search(link)
+    if m and m.group(2).startswith("{"):
+        link = link[:m.start(2)] + quote(m.group(2), safe="") + link[m.end(2):]
+    return link
+
+
+def scan(text):
+    # Обычный файл: один ключ на строку. Берём строку целиком, чтобы не
+    # обрезать ключ на кавычках или пробелах внутри JSON.
+    links = [l.strip() for l in text.splitlines() if LINE_RE.match(l.strip())]
+    if not links:  # HTML-страница канала и подобное: ищем по шаблону
+        links = LINK_RE.findall(text)
+    return links
+
+
 def extract_links(text):
     """Достаёт ключи из текста; если это base64-подписка, сначала раскодирует."""
-    links = LINK_RE.findall(text)
+    links = scan(text)
     if not links:
-        links = LINK_RE.findall(b64decode_safe(text))
-    return [l.replace("&amp;", "&").rstrip(".,;") for l in links]
+        links = scan(b64decode_safe(text))
+    return [normalize(l.replace("&amp;", "&").rstrip(".,;")) for l in links]
 
 
 def ss_parts(link):
