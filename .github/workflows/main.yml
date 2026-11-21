@@ -14,13 +14,24 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python collector.py
-      - run: |
+      - name: Install Xray
+        run: |
+          curl -sSL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q xray.zip xray -d xray-bin
+          chmod +x xray-bin/xray
+          ./xray-bin/xray version | head -1
+      - name: Collect keys
+        env:
+          XRAY_BIN: ./xray-bin/xray
+        run: python collector.py
+      - name: Save sub.txt
+        run: |
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
           git add sub.txt
