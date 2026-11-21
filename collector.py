@@ -24,11 +24,12 @@ from urllib.parse import quote, unquote, urlparse
 # Если добавляете новые, лучше писать их в конец списка, чтобы метки
 # старых источников не поменялись.
 SOURCES = [
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
-    "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
+        "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
+    "https://github.com/Epodonios/v2ray-configs/raw/main/Splitted-By-Protocol/vless.txt",
+    "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/reality",
     "https://github.com/pie-with-jam/PulseProxy/raw/refs/heads/main/githubmirror/1.txt",
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
+
 ]
 
 MAX_KEYS = 60          # сколько лучших ключей оставить
