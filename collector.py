@@ -22,6 +22,7 @@ import base64
 import ipaddress
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -39,15 +40,19 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 # Нумерация идёт сверху вниз: первая ссылка = s1, вторая = s2 и так далее.
 SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
-    "https://github.com/Epodonios/v2ray-configs/raw/main/Splitted-By-Protocol/vless.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
     "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/reality",
     "https://github.com/pie-with-jam/PulseProxy/raw/refs/heads/main/githubmirror/1.txt",
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
 ]
 
-MAX_PER_SOURCE = 40       # сколько лучших ключей брать от КАЖДОГО источника
+MAX_PER_SOURCE = 60       # сколько лучших ключей брать от КАЖДОГО источника
+MAX_PER_HOST = 3          # не больше стольких ключей на один сервер (адрес:порт)
+STRIP_XHTTP_EXTRA = True  # убирать из xhttp-ключей extra, который не разбирает Happ
 REAL_CHECK = True         # True = реальная проверка трафиком через Xray
-MAX_TEST_PER_SOURCE = 300 # сколько ключей от источника отправлять на реальную проверку
+MAX_TEST_PER_SOURCE = 500 # сколько ключей от источника отправлять на реальную проверку
+MAX_READ_PER_SOURCE = 4000 # если в источнике больше ключей, берём случайные столько
+MAX_BYTES = 15_000_000    # больше этого размера файл не скачиваем
 DEEP_CHECK = True         # быстрый фильтр: True = TLS-рукопожатие, False = только порт
 KEEP_OLD = True           # сохранять живые ключи из прошлого списка
 MAX_KEEP_OLD = 30         # сколько таких старых ключей максимум
@@ -73,9 +78,13 @@ TAG_RE = re.compile(r"\[(\w+) (\d{4})\]")
 # ---------- загрузка и разбор ----------
 
 def fetch(url):
+    """Скачивает файл, но не больше MAX_BYTES (защита от гигантских списков)."""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return r.read().decode("utf-8", errors="ignore")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = r.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:  # обрезаем по последнему переводу строки
+        data = data[:MAX_BYTES].rsplit(b"\n", 1)[0]
+    return data.decode("utf-8", errors="ignore")
 
 
 def b64decode_safe(s):
@@ -93,14 +102,31 @@ EXTRA_RE = re.compile(r"([?&]extra=)(.*?)(?=&[A-Za-z]+=|#|$)")
 
 def normalize(link):
     """
-    Некоторые источники пишут extra сырым JSON с кавычками. Такой ключ нельзя
-    резать по кавычке, а Happ воспринимает его как повреждённый JSON.
-    Кодируем extra по правилам URL.
+    Приводит параметр extra (xhttp) к виду, который переваривает Happ.
+    Happ 4.13 выдаёт «xhttpExtra_can_not_parse_error» на ключах с extra.
+    Если в extra только xmux (настройки мультиплексирования на стороне
+    клиента), параметр просто убираем: ключ работает и без него.
+    Если там что-то ещё (padding и т. п.), ключ пропускаем.
+    Возвращает ключ или None.
     """
     m = EXTRA_RE.search(link)
-    if m and m.group(2).startswith("{"):
-        link = link[:m.start(2)] + quote(m.group(2), safe="") + link[m.end(2):]
-    return link
+    if not m:
+        return link
+    value = unquote(m.group(2))
+    try:
+        extra = json.loads(value)
+    except Exception:
+        return None  # повреждённый JSON
+    if not isinstance(extra, dict):
+        return None
+    if STRIP_XHTTP_EXTRA:
+        if not set(extra) <= {"xmux"}:
+            return None
+        s, e = m.start(1), m.end(2)
+        if link[s] == "?" and link[e:e + 1] == "&":
+            return link[:s + 1] + link[e + 1:]
+        return link[:s] + link[e:]
+    return link[:m.start(2)] + quote(value, safe="") + link[m.end(2):]
 
 
 def scan(text):
@@ -117,7 +143,8 @@ def extract_links(text):
     links = scan(text)
     if not links:
         links = scan(b64decode_safe(text))
-    return [normalize(l.replace("&amp;", "&").rstrip(".,;")) for l in links]
+    fixed = (normalize(l.replace("&amp;", "&").rstrip(".,;")) for l in links)
+    return [l for l in fixed if l]
 
 
 def ss_parts(link):
@@ -173,6 +200,12 @@ def parse_target(link):
     except Exception:
         pass
     return None
+
+
+def host_key(link):
+    """Адрес:порт сервера. По нему ограничиваем число одинаковых серверов."""
+    t = parse_target(link)
+    return f"{t[0]}:{t[1]}" if t else link
 
 
 def check(link):
@@ -301,6 +334,18 @@ def to_outbound(link):
             if st is None:
                 return None
             user = {"id": unquote(u.username), "encryption": q.get("encryption") or "none"}
+            # Xray 26 отвергает такие ключи, не тратим на них запуски:
+            # 1) VLESS без шифрования (ни TLS, ни Reality), кроме локальных адресов
+            if st.get("security") == "none" and user["encryption"] == "none":
+                try:
+                    ip = ipaddress.ip_address(u.hostname)
+                    if not (ip.is_private or ip.is_loopback):
+                        return None
+                except ValueError:
+                    return None  # домен
+            # 2) Reality только поверх tcp, xhttp и grpc
+            if st.get("security") == "reality" and st["network"] not in ("tcp", "xhttp", "grpc"):
+                return None
             if q.get("flow"):
                 user["flow"] = q["flow"]
             return {"protocol": "vless", "streamSettings": st,
@@ -540,6 +585,8 @@ def main():
             stats[tag]["error"] = str(e)[:80]
             continue
         stats[tag]["found"] = len(found)
+        if len(found) > MAX_READ_PER_SOURCE:
+            found = random.sample(found, MAX_READ_PER_SOURCE)
         for l in found:
             if l not in tag_of:
                 tag_of[l] = tag
@@ -561,11 +608,12 @@ def main():
 
     pool = alive
     if use_real:
-        cand, cnt = [], {}
+        cand, cnt, hosts = [], {}, {}
         for l, _ in alive:  # уже отсортированы по скорости
-            t = tag_of[l]
-            if cnt.get(t, 0) < MAX_TEST_PER_SOURCE:
+            t, h = tag_of[l], host_key(l)
+            if cnt.get(t, 0) < MAX_TEST_PER_SOURCE and hosts.get(h, 0) < MAX_PER_HOST:
                 cnt[t] = cnt.get(t, 0) + 1
+                hosts[h] = hosts.get(h, 0) + 1
                 cand.append(l)
         print(f"Реальная проверка трафиком: {len(cand)} ключей...")
         pool = real_check(cand)
@@ -574,11 +622,12 @@ def main():
     pool = sorted(pool + unchecked, key=lambda x: x[1])
 
     # квота на каждый источник, чтобы один быстрый не вытеснял остальные
-    taken, best = {}, []
+    taken, best, used_hosts = {}, [], {}
     for l, lat in pool:
-        t = tag_of[l]
-        if taken.get(t, 0) < MAX_PER_SOURCE:
+        t, h = tag_of[l], host_key(l)
+        if taken.get(t, 0) < MAX_PER_SOURCE and used_hosts.get(h, 0) < MAX_PER_HOST:
             taken[t] = taken.get(t, 0) + 1
+            used_hosts[h] = used_hosts.get(h, 0) + 1
             best.append((l, lat))
             stats[t]["used"] += 1
 
@@ -590,6 +639,9 @@ def main():
         chosen = {core(l) for l, _ in best}
         prev, seen = [], set()
         for l in load_previous():
+            l = normalize(l)  # старые ключи тоже чистим от проблемного extra
+            if not l:
+                continue
             c = core(l)
             age = age_days(l, today)
             if c in chosen or c in seen or (age is not None and age > MAX_AGE_DAYS):
