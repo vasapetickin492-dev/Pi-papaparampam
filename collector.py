@@ -44,25 +44,39 @@ SOURCES = [
     "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/reality",
     "https://github.com/pie-with-jam/PulseProxy/raw/refs/heads/main/githubmirror/1.txt",
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
+    # s6-s8: ещё списки igareck. Он сам проверяет ключи из России, см. NO_CHECK ниже
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
 ]
 
 MAX_PER_SOURCE = 60       # сколько лучших ключей брать от КАЖДОГО источника
 MAX_PER_HOST = 3          # не больше стольких ключей на один сервер (адрес:порт)
 STRIP_XHTTP_EXTRA = True  # убирать из xhttp-ключей extra, который не разбирает Happ
 REAL_CHECK = True         # True = реальная проверка трафиком через Xray
-MAX_TEST_PER_SOURCE = 500 # сколько ключей от источника отправлять на реальную проверку
+MAX_TEST_PER_SOURCE = 400 # сколько ключей от источника отправлять на реальную проверку
 MAX_READ_PER_SOURCE = 4000 # если в источнике больше ключей, берём случайные столько
 MAX_BYTES = 15_000_000    # больше этого размера файл не скачиваем
 DEEP_CHECK = True         # быстрый фильтр: True = TLS-рукопожатие, False = только порт
 KEEP_OLD = True           # сохранять живые ключи из прошлого списка
 MAX_KEEP_OLD = 30         # сколько таких старых ключей максимум
 MAX_AGE_DAYS = 3          # сколько дней старый ключ может жить без источника
-NO_CHECK = []             # номера источников, ключи которых вообще не проверяются
+# ДОВЕРЕННЫЕ источники (номера: 1 = s1, 2 = s2 ...). Их ключи не проверяются
+# отсюда, а берутся как есть, в порядке файла, и идут в подписке первыми с
+# меткой [rN]. Нужно потому, что проверка идёт с серверов в США и не видит
+# российские серверы и белые списки: они могут быть закрыты для всего мира,
+# кроме России. igareck сам тестирует свои списки из России каждый час.
+# Остальные источники (зарубежные, публичные) проверяются трафиком.
+NO_CHECK = [1, 2, 6, 7, 8]
+MAX_PER_TRUSTED = 40      # сколько ключей брать от каждого доверенного источника
 
 TIMEOUT = 5               # секунд на быстрый фильтр
 THREADS = 60              # параллельных быстрых проверок
 BATCH = 100               # ключей в одной пачке для Xray
-TEST_TIMEOUT = 10         # секунд на реальный запрос через ключ
+TEST_TIMEOUT = 8          # секунд на реальный запрос через ключ
+ROUNDS = 3                # сколько раз проверять каждый ключ (против «мигающих»)
+ROUND_GAP = 5             # пауза между проверками, секунд
+MIN_PASS = 2              # сколько проверок из ROUNDS ключ должен пройти
 TEST_HOST = "cp.cloudflare.com"   # куда идёт тестовый запрос
 TEST_PORT = 80
 TEST_PATH = "/generate_204"       # ответ 204 = трафик реально прошёл
@@ -468,10 +482,30 @@ def run_batch(items):
                     time.sleep(0.1)
             if not ready:
                 return []
-            ports = [BASE_PORT + i for i in range(len(items))]
-            with ThreadPoolExecutor(len(items)) as ex:
-                times = list(ex.map(proxy_probe, ports))
-            return [(l, t) for (l, _), t in zip(items, times) if t is not None]
+            # Несколько проверок с паузой: «мигающие» ключи, которые то работают,
+            # то нет, отсеиваются. Ключ, который уже не наберёт MIN_PASS, в
+            # следующих заходах не проверяем.
+            hits = [[] for _ in items]
+            fails = [0] * len(items)
+            active = list(range(len(items)))
+            for r in range(ROUNDS):
+                if not active:
+                    break
+                if r:
+                    time.sleep(ROUND_GAP)
+                with ThreadPoolExecutor(len(active)) as ex:
+                    times = list(ex.map(proxy_probe, [BASE_PORT + i for i in active]))
+                for i, t in zip(active, times):
+                    if t is None:
+                        fails[i] += 1
+                    else:
+                        hits[i].append(t)
+                active = [i for i in active if fails[i] <= ROUNDS - MIN_PASS]
+            res = []
+            for (l, _), h in zip(items, hits):
+                if len(h) >= MIN_PASS:
+                    res.append((l, sorted(h)[len(h) // 2]))  # медианная задержка
+            return res
         finally:
             proc.terminate()
             try:
@@ -598,7 +632,11 @@ def main():
 
     skip_tags = {f"s{n}" for n in NO_CHECK}
     to_check = [l for l in links if tag_of[l] not in skip_tags]
-    unchecked = [(l, 999.0) for l in links if tag_of[l] in skip_tags]
+    trusted = [l for l in links if tag_of[l] in skip_tags]  # в порядке файла
+
+    # прошлый список: нужен и для «памяти», и чтобы ставить стабильные ключи вперёд
+    prev_all = [x for x in (normalize(l) for l in load_previous()) if x]
+    prev_cores = {core(l) for l in prev_all}
 
     with ThreadPoolExecutor(THREADS) as ex:
         alive = [r for r in ex.map(check, to_check) if r]
@@ -619,7 +657,9 @@ def main():
         pool = real_check(cand)
         for l, _ in pool:
             stats[tag_of[l]]["real"] += 1
-    pool = sorted(pool + unchecked, key=lambda x: x[1])
+    # проверенные ключи: сначала те, что уже были в прошлом списке (значит
+    # продержались как минимум между двумя запусками), потом по задержке
+    pool = sorted(pool, key=lambda x: (0 if core(x[0]) in prev_cores else 1, x[1]))
 
     # квота на каждый источник, чтобы один быстрый не вытеснял остальные
     taken, best, used_hosts = {}, [], {}
@@ -631,17 +671,25 @@ def main():
             best.append((l, lat))
             stats[t]["used"] += 1
 
-    out = [tag_link(l, f"{tag_of[l]} {stamp}") for l, _ in best]
+    # доверенные ключи: берём первые по порядку файла (у igareck лучшие сверху)
+    tr_best = []
+    for l in trusted:
+        t, h = tag_of[l], host_key(l)
+        if taken.get(t, 0) < MAX_PER_TRUSTED and used_hosts.get(h, 0) < MAX_PER_HOST:
+            taken[t] = taken.get(t, 0) + 1
+            used_hosts[h] = used_hosts.get(h, 0) + 1
+            tr_best.append(l)
+            stats[t]["used"] += 1
+
+    out = [tag_link(l, f"r{tag_of[l][1:]} {stamp}") for l in tr_best]
+    out += [tag_link(l, f"{tag_of[l]} {stamp}") for l, _ in best]
 
     # ключи из прошлого списка, которые всё ещё живы
     kept = 0
     if KEEP_OLD:
-        chosen = {core(l) for l, _ in best}
+        chosen = {core(l) for l, _ in best} | {core(l) for l in tr_best}
         prev, seen = [], set()
-        for l in load_previous():
-            l = normalize(l)  # старые ключи тоже чистим от проблемного extra
-            if not l:
-                continue
+        for l in prev_all:
             c = core(l)
             age = age_days(l, today)
             if c in chosen or c in seen or (age is not None and age > MAX_AGE_DAYS):
@@ -665,6 +713,10 @@ def main():
     for tag, s in stats.items():
         if s["error"]:
             print(f"{tag}: ОШИБКА загрузки ({s['error']})\n    {s['url']}")
+            continue
+        if tag in skip_tags:
+            print(f"{tag} [r{tag[1:]}]: найдено {s['found']}, новых {s['unique']}, "
+                  f"ДОВЕРЕННЫЙ (без проверки), в подписке {s['used']}\n    {s['url']}")
             continue
         real = f", трафик ОК {s['real']}" if use_real else ""
         print(f"{tag}: найдено {s['found']}, новых {s['unique']}, "
